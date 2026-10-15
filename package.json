@@ -1,0 +1,47 @@
+{
+  "name": "glitter-powder",
+  "version": "0.1.0",
+  "description": "A real-feeling glitter powder for React: draw in glue, pour glitter, push it around, and blow it away to reveal your art. WebGL2.",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./engine": {
+      "default": "./src/engine.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "react": ">=17"
+  },
+  "keywords": [
+    "glitter",
+    "react",
+    "webgl",
+    "webgl2",
+    "simulation",
+    "art",
+    "interactive",
+    "creative-coding"
+  ],
+  "author": "Prerna Kashyap",
+  "scripts": {
+    "demo": "npx serve ."
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cray4pasta/glitter-powder.git"
+  },
+  "homepage": "https://github.com/cray4pasta/glitter-powder#readme"
+}
