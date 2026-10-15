@@ -10,7 +10,7 @@ import { createElement, forwardRef, useEffect, useImperativeHandle, useRef } fro
 import { createGlitter } from './engine.js';
 
 // Props that are just passed through to the engine as options
-const OPTION_KEYS = ['color', 'shimmer', 'paper', 'word', 'tool', 'glueWidth', 'brushSize', 'amount',
+const OPTION_KEYS = ['color', 'shimmer', 'paper', 'word', 'tool', 'glueWidth', 'brushSize', 'pushSize', 'eraserSize', 'amount',
   'blowOnLongPress', 'interactive', 'onReveal', 'onReady'];
 // Props that only matter when it starts
 const START_KEYS = ['heap', 'autoBlow', 'loadFont', 'onError'];

@@ -6,16 +6,17 @@
 <title>Glitter powder</title>
 <meta name="description" content="Draw in glue, pour glitter over it, push it around, and blow it away to see what stuck.">
 <style>
-  :root { --ink: #1d1d1f; --line: rgb(0 0 0 / 0.08); --soft: #f4f4f5; }
+  :root { --ink: #1d1d1f; --line: rgb(0 0 0 / 0.08); --soft: #f4f4f5; --muted: #8e8e93; }
   html, body { margin: 0; height: 100%; background: #fff; font: 13px/1.3 system-ui, -apple-system, sans-serif; color: var(--ink); }
   #root { position: fixed; inset: 0; }
   .bar {
     position: fixed; left: 50%; bottom: 20px; translate: -50% 0; z-index: 2;
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center;
-    max-width: calc(100vw - 32px); padding: 8px; border-radius: 14px;
+    display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+    max-width: calc(100vw - 32px); padding: 8px; border-radius: 16px;
     background: rgb(255 255 255 / 0.86); backdrop-filter: blur(12px);
     box-shadow: 0 0 0 1px var(--line), 0 18px 40px -18px rgb(0 0 0 / 0.35);
   }
+  .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center; }
   .group { display: flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--soft); }
   .bar button {
     border: 0; background: transparent; color: inherit; font: inherit; padding: 7px 11px; border-radius: 8px; cursor: pointer;
@@ -24,11 +25,28 @@
   .bar button[aria-pressed="true"] { background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
   .bar .act { background: var(--ink); color: #fff; }
   .bar .act:hover { background: #3a3a3c; }
+  .size { display: flex; align-items: center; gap: 8px; padding: 0 6px; color: var(--muted); }
+  .size input { width: 110px; accent-color: var(--ink); }
+  .size output { min-width: 34px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .swatches { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .sw-wrap { position: relative; display: inline-flex; }
   .sw { width: 22px; height: 22px; padding: 0 !important; border-radius: 50% !important; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.12); }
   .sw[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
-  .bar input[type=color] { width: 26px; height: 26px; border: 0; padding: 0; background: none; cursor: pointer; }
+  .sw-x {
+    position: absolute; top: -6px; right: -6px; width: 14px; height: 14px; padding: 0 !important;
+    border-radius: 50% !important; background: var(--ink) !important; color: #fff; font-size: 10px; line-height: 14px;
+    opacity: 0; transition: opacity 0.12s;
+  }
+  .sw-wrap:hover .sw-x, .sw-x:focus-visible { opacity: 1; }
+  @media (hover: none) { .sw-wrap .sw[aria-pressed="true"] + .sw-x { opacity: 1; } }
+  .add { position: relative; width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.2);
+         display: grid; place-items: center; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+  .add:hover { color: var(--ink); }
+  .add input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; border: 0; padding: 0; }
   .sep { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
-  .hint { position: fixed; top: 18px; left: 50%; translate: -50% 0; z-index: 2; color: #8e8e93; pointer-events: none; text-align: center; padding: 0 16px; }
+  .hint { position: fixed; top: 18px; left: 50%; translate: -50% 0; z-index: 2; color: var(--muted); pointer-events: none; text-align: center; padding: 0 16px; }
+  .ring { position: fixed; z-index: 1; pointer-events: none; border-radius: 50%; translate: -50% -50%;
+          box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35), 0 0 0 2px rgb(255 255 255 / 0.6); }
 </style>
 <script type="importmap">
 { "imports": {
@@ -40,39 +58,78 @@
 <body>
 <div id="root"></div>
 <script type="module">
-  import { createElement as h, useRef, useState } from 'react';
+  import { createElement as h, useEffect, useRef, useState } from 'react';
   import { createRoot } from 'react-dom/client';
   import { Glitter } from '../src/index.js';
 
-  const COLORS = ['#f2a7c8', '#c9a7f2', '#9fd4f2', '#a8e6c3', '#f6d58e', '#f4a48a', '#e8e8ee'];
-  const HINTS = {
-    glue: 'Draw with glue. Then pour glitter over it and blow.',
-    glitter: 'Sprinkle glitter by hand.',
-    push: 'Push the glitter around. Flick fast to throw it. Hold still to blow.',
-  };
+  const PRESETS = ['#f2a7c8', '#c9a7f2', '#9fd4f2', '#a8e6c3', '#f6d58e', '#f4a48a', '#e8e8ee'];
+  const TOOLS = [
+    { id: 'glue', label: 'Glue', prop: 'glueWidth', min: 4, max: 60, start: 14, ring: (v) => v,
+      hint: 'Draw with glue. Pour glitter over it, then hold still (or press Blow).' },
+    { id: 'glitter', label: 'Glitter', prop: 'brushSize', min: 6, max: 80, start: 22, ring: (v) => v * 2,
+      hint: 'Sprinkle glitter by hand. Switch colours as you go.' },
+    { id: 'push', label: 'Push', prop: 'pushSize', min: 8, max: 60, start: 20, ring: (v) => v * 2,
+      hint: 'Push the glitter around. Flick fast to throw it. Hold still to blow.' },
+    { id: 'erase', label: 'Eraser', prop: 'eraserSize', min: 8, max: 120, start: 28, ring: (v) => v,
+      hint: 'Erase glue, and any glitter stuck to it.' },
+  ];
+  const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+  const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
   function App() {
     const g = useRef(null);
     const [tool, setTool] = useState('glue');
-    const [color, setColor] = useState(COLORS[0]);
+    const [color, setColor] = useState(PRESETS[0]);
+    const [custom, setCustom] = useState(() => load('glitter-colours', []));
+    const [sizes, setSizes] = useState(() => Object.fromEntries(TOOLS.map((t) => [t.id, t.start])));
+    const [ring, setRing] = useState(null);
+    const picker = useRef(null);
+    useEffect(() => save('glitter-colours', custom), [custom]);
+
+    const T = TOOLS.find((t) => t.id === tool);
+    const sizeProps = Object.fromEntries(TOOLS.map((t) => [t.prop, sizes[t.id]]));
+    const addColour = (c) => { setCustom((cs) => (cs.includes(c) || PRESETS.includes(c) ? cs : [...cs, c].slice(-12))); setColor(c); };
+    const removeColour = (c) => { setCustom((cs) => cs.filter((x) => x !== c)); if (color === c) setColor(PRESETS[0]); };
+    // React's onChange fires while dragging in the picker; the native change event once it's closed
+    useEffect(() => {
+      const el = picker.current, done = () => addColour(el.value);
+      el.addEventListener('change', done);
+      return () => el.removeEventListener('change', done);
+    }, []);
+
     const btn = (label, on, onClick, cls) => h('button', { 'aria-pressed': on === undefined ? undefined : String(on), className: cls, onClick }, label);
-    return h('div', { style: { position: 'absolute', inset: 0 } },
-      h(Glitter, { ref: g, tool, color, heap: false }),
-      h('div', { className: 'hint' }, HINTS[tool]),
-      h('div', { className: 'bar' },
-        h('div', { className: 'group' },
-          btn('Glue', tool === 'glue', () => setTool('glue')),
-          btn('Glitter', tool === 'glitter', () => setTool('glitter')),
-          btn('Push', tool === 'push', () => setTool('push'))),
-        h('span', { className: 'sep' }),
-        ...COLORS.map((c) => h('button', { className: 'sw', 'aria-label': 'Glitter colour ' + c, 'aria-pressed': String(color === c), style: { background: c }, onClick: () => setColor(c) })),
-        h('input', { type: 'color', value: color, 'aria-label': 'Any glitter colour', onChange: (e) => setColor(e.target.value) }),
-        h('span', { className: 'sep' }),
-        btn('Pour', undefined, () => g.current.pour(), 'act'),
-        btn('Blow', undefined, () => g.current.blow(), 'act'),
-        h('span', { className: 'sep' }),
-        btn('Clear glitter', undefined, () => g.current.clear()),
-        btn('Clear glue', undefined, () => g.current.clearGlue())));
+    const swatch = (c, removable) => h('span', { className: 'sw-wrap', key: c },
+      h('button', { className: 'sw', 'aria-label': 'Glitter colour ' + c, 'aria-pressed': String(color === c), style: { background: c }, onClick: () => setColor(c) }),
+      removable && h('button', { className: 'sw-x', 'aria-label': 'Remove colour ' + c, onClick: () => removeColour(c) }, '×'));
+
+    return h('div', {
+        style: { position: 'absolute', inset: 0, cursor: 'none' },
+        onPointerMove: (e) => setRing(e.target.tagName === 'CANVAS' ? { x: e.clientX, y: e.clientY } : null),
+        onPointerLeave: () => setRing(null),
+      },
+      h(Glitter, { ref: g, tool, color, heap: false, ...sizeProps }),
+      ring && h('div', { className: 'ring', style: { left: ring.x, top: ring.y, width: T.ring(sizes[tool]), height: T.ring(sizes[tool]) } }),
+      h('div', { className: 'hint' }, T.hint),
+      h('div', { className: 'bar', style: { cursor: 'auto' } },
+        h('div', { className: 'row' },
+          h('div', { className: 'group' }, ...TOOLS.map((t) => btn(t.label, tool === t.id, () => setTool(t.id)))),
+          h('label', { className: 'size' }, 'Size',
+            h('input', { type: 'range', min: T.min, max: T.max, value: sizes[tool],
+              onChange: (e) => setSizes((s) => ({ ...s, [tool]: +e.target.value })) }),
+            h('output', null, sizes[tool] + 'px')),
+          h('span', { className: 'sep' }),
+          btn('Pour', undefined, () => g.current.pour(), 'act'),
+          btn('Blow', undefined, () => g.current.blow(), 'act'),
+          h('span', { className: 'sep' }),
+          btn('Clear glitter', undefined, () => g.current.clear()),
+          btn('Clear glue', undefined, () => g.current.clearGlue())),
+        h('div', { className: 'row swatches' },
+          ...PRESETS.map((c) => swatch(c, false)),
+          custom.length > 0 && h('span', { className: 'sep' }),
+          ...custom.map((c) => swatch(c, true)),
+          h('label', { className: 'add', title: 'Add your own colour' }, '+',
+            h('input', { ref: picker, type: 'color', value: color, 'aria-label': 'Add your own glitter colour',
+              onChange: (e) => setColor(e.target.value) })))));
   }
   createRoot(document.getElementById('root')).render(h(App));
 </script>

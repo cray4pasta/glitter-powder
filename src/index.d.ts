@@ -1,9 +1,9 @@
 import type { CanvasHTMLAttributes, ForwardRefExoticComponent, RefAttributes } from 'react';
 
-export type GlitterTool = 'glue' | 'glitter' | 'push';
+export type GlitterTool = 'glue' | 'glitter' | 'push' | 'erase';
 
 export interface GlitterOptions {
-  /** Glitter colour (hex). Default '#f2a7c8' */
+  /** Colour of the glitter added next (hex). Glitter already down keeps its colour. Default '#f2a7c8' */
   color?: string;
   /** How iridescent the flakes are, 0 plain – 1 rainbow. Default 0.55 */
   shimmer?: number;
@@ -11,12 +11,16 @@ export interface GlitterOptions {
   paper?: string;
   /** A word written in glue to start with ('' for none). Default '' */
   word?: string;
-  /** 'glue' draws glue, 'glitter' sprinkles glitter, 'push' plays with it. Default 'push' */
+  /** 'glue' draws glue, 'glitter' sprinkles glitter, 'push' plays with it, 'erase' wipes glue (and the glitter stuck to it). Default 'push' */
   tool?: GlitterTool;
   /** Glue line width, CSS px. Default 14 */
   glueWidth?: number;
   /** Glitter sprinkle radius, CSS px. Default 22 */
   brushSize?: number;
+  /** Finger radius when pushing glitter, CSS px. Default 20 */
+  pushSize?: number;
+  /** Eraser width, CSS px. Default 28 */
+  eraserSize?: number;
   /** How much glitter one sprinkle drops. Default 1.2 */
   amount?: number;
   /** Start with a heap of glitter poured over the glue. Default true */
@@ -40,11 +44,11 @@ export interface GlitterOptions {
 export interface GlitterHandle {
   /** The breath: blows loose glitter away, leaving what's stuck to the glue */
   blow(): void;
-  /** Pour a fresh heap of glitter over the glue */
+  /** Pour a heap of glitter, in the current colour, over the bare glue. What's already down stays. */
   pour(): void;
   /** Sweep all glitter off, keeping the glue */
   clear(): void;
-  /** Wipe the drawn glue (a word, if any, stays) */
+  /** Wipe the drawn glue (a word, if any, comes back whole); glitter stuck to it comes loose */
   clearGlue(): void;
   /** Skip to the finished piece */
   reveal(): void;

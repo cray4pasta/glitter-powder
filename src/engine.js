@@ -19,14 +19,26 @@ uniform sampler2D uSim; // r = powder height (in sim cells), g = shuffle seed, b
 uniform vec2  uGrid;    // sim grid size (cells)
 uniform float uCell;    // css px per sim cell
 uniform sampler2D uGlue; // full-resolution glue mask (alpha), for crisp lettering
-uniform vec3  uTint;    // glitter base colour
+uniform highp sampler2D uCol; // per cell, as palette slots: r = loose glitter's two colours (4 bits each),
+                        // g = share of the second, b/a = the same for the glitter stuck to the glue
+uniform vec3  uPal[16]; // the glitter colours in use
 uniform vec3  uPaper;   // the paper underneath
 uniform float uHolo;    // 0 = reflections in the base colour (metallic), 1 = full rainbow
 uniform float uFlakePx; // spacing of the holographic flakes (CSS px), scaled to the lettering
 out vec4 outColor;
 
 // The base colour at full brightness: what a coloured metallic flake reflects
-vec3 tintSpec(){ return uTint / max(max(uTint.r, max(uTint.g, uTint.b)), 0.04); }
+vec3 tintSpec(vec3 c){ return c / max(max(c.r, max(c.g, c.b)), 0.04); }
+
+// One grain's colour. Each cell holds up to two colours of loose glitter and two of
+// glitter stuck to the glue; a grain is one or the other by chance, so mixed
+// glitter reads as speckles of each colour rather than a blend.
+vec3 cellColour(ivec2 c, float pick, bool loose){
+  vec4 v = floor(texelFetch(uCol, c, 0) * 255.0 + 0.5);
+  vec2 lv = loose ? v.rg : v.ba;
+  int ab = int(lv.x), a = ab / 16, b = ab - a * 16;
+  return uPal[pick < lv.y / 255.0 ? b : a];
+}
 
 vec3 hash32(vec2 p){
   vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
@@ -53,7 +65,7 @@ float height(vec2 css){ return texture(uSim, css / (uGrid * uCell)).r; }
 
 // A holographic flake is a tiny flat mirror on the grain. It only sparkles when its facet
 // lines up with the light, so sparkles gather where the pile's surface faces the light.
-vec3 flakeLight(vec2 sid, float chance, float flatness, vec3 N, vec3 L, vec3 H, out vec3 rainbow, out float isFlake){
+vec3 flakeLight(vec2 sid, float chance, float flatness, vec3 N, vec3 L, vec3 H, vec3 tint, out vec3 rainbow, out float isFlake){
   vec3 gh2 = hash32(sid * 1.37 + 5.1);
   isFlake = step(gh2.x, chance);
   rainbow = vec3(1.0);
@@ -72,7 +84,7 @@ vec3 flakeLight(vec2 sid, float chance, float flatness, vec3 N, vec3 L, vec3 H, 
   float amp = 1.0 + 4.0 * pow(gh3.y, 3.0);                   // facet size / quality
   // Colour from the flake's coating thickness and the angle light hits its face
   float film = mix(250.0, 600.0, hash32(sid * 2.7 + 1.3).x);
-  rainbow = mix(tintSpec(), thinFilm(max(dot(Nf, L), 0.0), film), uHolo);
+  rainbow = mix(tintSpec(tint), thinFilm(max(dot(Nf, L), 0.0), film), uHolo);
   float spec = pow(fd, sharp) * amp;
   return rainbow * (pow(fd, 12.0) * 0.15 + spec * 1.6)       // coloured reflection
        + vec3(1.0) * pow(spec, 3.0) * 0.08;                  // white core only at near-perfect alignment
@@ -151,6 +163,12 @@ void main(){
   vec3 gh2 = hash32(sid * 1.37 + 5.1);
   vec3 gh3 = hash32(sid * 0.73 + 19.0);
 
+  // The grain's colour, from a cell near its centre (jittered, so colour borders come out
+  // grainy instead of square): the loose glitter on top, or what's stuck to the glue below
+  vec3 gj = hash32(sid * 2.31 + 9.7);
+  ivec2 cc = clamp(ivec2(floor((gcCss + (gj.xy - 0.5) * uCell * 1.6) / uCell)), ivec2(0), ivec2(uGrid) - 1);
+  vec3 tint = cellColour(cc, gj.z, gh.y < clamp(looseH / 0.9, 0.0, 1.0));
+
   float rad = 0.5 + 0.12 * gh.x;
   float rr = dist / rad;
   float inBead = 1.0 - smoothstep(0.82, 1.0, rr);
@@ -173,18 +191,18 @@ void main(){
   // Gritty base: each grain has its own tone, a few are noticeably darker or brighter
   float tone = (0.80 + 0.26 * gh.z) * (1.0 + 0.05 * exposedGlue);
   tone *= mix(1.0, 0.72, step(0.95, gh3.y));                  // occasional dark grain
-  vec3 albedo = uTint * tone;
+  vec3 albedo = tint * tone;
   vec3 bead = albedo * (0.80 + 0.30 * diff);
   bead *= mix(0.84, 1.0, smoothstep(0.0, 0.22, edge));
-  bead += mix(vec3(1.0), tintSpec(), 0.5) * pow(max(dot(Nb, H), 0.0), 45.0) * 0.35;
+  bead += mix(vec3(1.0), tintSpec(tint), 0.5) * pow(max(dot(Nb, H), 0.0), 45.0) * 0.35;
 
   // Tiny glints from the fine grains themselves
   vec3 rainbow;
   float isFlake;
-  vec3 flake = flakeLight(sid, 0.06, exposedGlue, N, L, H, rainbow, isFlake);
+  vec3 flake = flakeLight(sid, 0.06, exposedGlue, N, L, H, tint, rainbow, isFlake);
   bead += flake * isFlake * inBead * 0.7;
 
-  vec3 gapPowder = uTint * 0.935 * (0.76 + 0.26 * macroDiff);
+  vec3 gapPowder = tint * 0.935 * (0.76 + 0.26 * macroDiff);
   vec3 col = mix(mix(bg, gapPowder, deep), bead, inBead * present);
 
   // ---- Wet glue that no glitter has stuck to yet: a clear, raised, glossy line ----
@@ -225,14 +243,16 @@ void main(){
 
     float size = r2.x * r2.x * r2.x;                           // mostly small, a few large
     float radius = mix(0.12, 0.45, size);                      // up to ~0.9 × uFlakePx across
+    vec3 fc = hash32(fsid * 1.7 + 3.3);
+    vec3 tintF = cellColour(ct, fc.x, r2.y < clamp(looseF / 1.2, 0.0, 1.0));
     vec3 rb; float isF;
-    vec3 lit = flakeLight(fsid, 1.0, onGlue, N, L, H, rb, isF);
+    vec3 lit = flakeLight(fsid, 1.0, onGlue, N, L, H, tintF, rb, isF);
     float peak = max(lit.r, max(lit.g, lit.b));
     float soft = radius * (0.18 + 0.7 * clamp(peak - 0.8, 0.0, 1.0) * (0.3 + size));
     float d = length(fg - c);
     float cov = 1.0 - smoothstep(radius - soft, radius + soft, d);
 
-    vec3 silver = uTint * 0.945 * (0.80 + 0.24 * macroDiff) * (0.92 + 0.14 * r2.z);
+    vec3 silver = tintF * 0.945 * (0.80 + 0.24 * macroDiff) * (0.92 + 0.14 * r2.z);
     float lift = clamp(peak, 0.0, 1.0);                       // unlit flakes stay faint, lit ones solid
     col = mix(col, silver + lit * (1.0 + size), cov * mix(0.45, 1.0, lift));
     float over = max(peak - 1.0, 0.0);
@@ -246,13 +266,13 @@ void main(){
 const PVS = `#version 300 es
 // Airborne flakes: flat mirrors tumbling as they drift down
 in vec4 aA;             // x, y (sim cells), altitude (cells), size (css px)
-in vec4 aB;             // spin angle, spin axis angle, film thickness (nm), random
+in vec4 aB;             // spin angle, spin axis angle, film thickness (nm), colour (palette slot)
 uniform vec2  uRes;
 uniform float uDpr;
 uniform float uCell;
 uniform vec2  uLight;
 uniform float uShadow;  // 1 = draw the soft shadow on the ground, 0 = the flake itself
-uniform vec3  uTint;
+uniform vec3  uPal[16];
 uniform float uHolo;
 out vec3  vCol;
 out float vAlpha;
@@ -285,8 +305,9 @@ void main(){
     vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
     float fd = abs(dot(Nf, H));                 // a flat flake reflects from either side
     float spec = pow(fd, 40.0) * 3.0;
-    vec3 silver = uTint * 0.86 * (0.75 + 0.25 * faceOn);
-    vec3 tintSpec = uTint / max(max(uTint.r, max(uTint.g, uTint.b)), 0.04);
+    vec3 tint = uPal[int(aB.w + 0.5)];
+    vec3 silver = tint * 0.86 * (0.75 + 0.25 * faceOn);
+    vec3 tintSpec = tint / max(max(tint.r, max(tint.g, tint.b)), 0.04);
     vCol = silver + mix(tintSpec, thinFilm(abs(dot(Nf, L)), aB.z), uHolo) * spec + vec3(pow(spec, 3.0) * 0.05);
     gl_PointSize = max(size * (0.6 + 0.4 * faceOn) * uDpr, 1.0);
     vAlpha = mix(0.6, 1.0, clamp(spec, 0.0, 1.0)) * (0.6 + 0.4 * faceOn);
@@ -323,13 +344,15 @@ function loadFont(url) {
 }
 
 export const DEFAULTS = {
-  color: '#f2a7c8',        // glitter colour
+  color: '#f2a7c8',        // colour of the glitter you add next (what's already down keeps its colour)
   shimmer: 0.55,           // how iridescent the flakes are (0 plain – 1 rainbow)
   paper: '#ffffff',        // the paper underneath
   word: '',                // a word written in glue to start with ('' for none)
-  tool: 'push',            // 'glue' draws glue, 'glitter' sprinkles glitter, 'push' plays with it
+  tool: 'push',            // 'glue' draws glue, 'glitter' sprinkles glitter, 'push' plays with it, 'erase' wipes glue
   glueWidth: 14,           // glue line width, CSS px
   brushSize: 22,           // glitter sprinkle radius, CSS px
+  pushSize: 20,            // finger radius when pushing glitter, CSS px
+  eraserSize: 28,          // eraser width, CSS px
   amount: 1.2,             // how much glitter one sprinkle drops
   heap: true,              // start with a heap of glitter poured over the glue
   autoBlow: false,         // blow it away by itself once it has loaded
@@ -376,9 +399,9 @@ export function createGlitter(canvas, options = {}) {
   gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
   const U = {};
-  for (const n of ['uRes','uTime','uDpr','uLight','uSim','uGrid','uCell','uGlue','uTint','uHolo','uFlakePx','uPaper']) U[n] = gl.getUniformLocation(prog, n);
+  for (const n of ['uRes','uTime','uDpr','uLight','uSim','uGrid','uCell','uGlue','uCol','uPal','uHolo','uFlakePx','uPaper']) U[n] = gl.getUniformLocation(prog, n);
   const PU = {};
-  for (const n of ['uRes','uDpr','uCell','uLight','uShadow','uTint','uHolo']) PU[n] = gl.getUniformLocation(pprog, n);
+  for (const n of ['uRes','uDpr','uCell','uLight','uShadow','uPal','uHolo']) PU[n] = gl.getUniformLocation(pprog, n);
 
   // Airborne flake buffer: 8 floats per particle
   const MAXP = 4000, PSTRIDE = 8;
@@ -403,11 +426,19 @@ export function createGlitter(canvas, options = {}) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.uniform1i(U.uSim, 0);
   gl.uniform1i(U.uGlue, 1);
+  gl.uniform1i(U.uCol, 2);
   const glueTex = gl.createTexture();
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, glueTex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const colTex = gl.createTexture();                 // glitter colours per sim cell
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, colTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.activeTexture(gl.TEXTURE0);
@@ -446,10 +477,58 @@ export function createGlitter(canvas, options = {}) {
   const DEFAULT_SIZE = 197;                               // font size of the glue lettering (CSS px)
   let flakePx = 5;                                        // set from the font size in buildGlueBase()
   let glueSize = DEFAULT_SIZE;
-  const colorState = { hex: opts.color, holo: opts.shimmer, rgb: new Float32Array(hexToRgb(opts.color)) };
+  const colorState = { holo: opts.shimmer };
+  // Glitter colours. Every colour on the paper has a slot in a small palette; the sim
+  // tracks, per cell, which slots its glitter is made of. Slots free up once a colour
+  // is entirely gone from the paper.
+  const SLOTS = 16;
+  const palHex = new Array(SLOTS).fill(null);
+  const palRgb = new Float32Array(SLOTS * 3);
+  let curSlot = -1, curHex = '';
+  const normHex = (hx) => {
+    let v = String(hx || '').trim().toLowerCase();
+    if (/^#[0-9a-f]{3}$/.test(v)) v = '#' + [...v.slice(1)].map((c) => c + c).join('');
+    return /^#[0-9a-f]{6}$/.test(v) ? v : DEFAULTS.color;
+  };
+  // The slot for the colour new glitter is added in
+  function slotNow() {
+    const hx = normHex(opts.color);
+    if (hx === curHex && palHex[curSlot] === hx) return curSlot;
+    let s = palHex.indexOf(hx);
+    if (s < 0) s = palHex.indexOf(null);
+    if (s < 0) { freeSlots(); s = palHex.indexOf(null); }
+    if (s < 0) {                                       // all in use: borrow the nearest colour
+      const c = hexToRgb(hx);
+      let best = 1e9;
+      for (let k = 0; k < SLOTS; k++) {
+        const d = (palRgb[3 * k] - c[0]) ** 2 + (palRgb[3 * k + 1] - c[1]) ** 2 + (palRgb[3 * k + 2] - c[2]) ** 2;
+        if (d < best) { best = d; s = k; }
+      }
+    } else {
+      palHex[s] = hx;
+      palRgb.set(hexToRgb(hx), 3 * s);
+    }
+    curHex = hx; curSlot = s;
+    return s;
+  }
+  // Frees the slots of colours no longer anywhere on the paper (or in the air)
+  function freeSlots() {
+    const used = new Uint8Array(SLOTS);
+    for (let i = 0; i < h.length; i++) {
+      if (h[i] - stuck[i] > 1e-3) { if (lA[i] >= 0) used[lA[i]] = 1; if (lB[i] >= 0) used[lB[i]] = 1; }
+      if (stuck[i] > 1e-3) { if (sA[i] >= 0) used[sA[i]] = 1; if (sB[i] >= 0) used[sB[i]] = 1; }
+    }
+    for (let n = 0; n < np; n++) used[P.c[n]] = 1;
+    if (carried > 0 && carriedSlot >= 0) used[carriedSlot] = 1;
+    for (let k = 0; k < SLOTS; k++) if (!used[k]) palHex[k] = null;
+  }
   const paperRgb = new Float32Array(hexToRgb(opts.paper));
   const GLUE_FONT = '"Qwitcher Grypen", cursive';
   let W, H, h, seed, thr, flow, glue, paperCap, stuck, dh, buf, active = 0, dirty = true;
+  // Colours per cell: the loose glitter's two main palette slots (A, B; -1 for none) and the
+  // share of B, the same for the glitter stuck to the glue, and for glitter blown in this step
+  let lA, lB, lF, sA, sB, sF, iA, iB, iF, colBuf;
+  let carriedSlot = -1;    // colour of what clings to the finger
   let vx, vy, outM, mIn, pX, pY;   // velocity of moving loose glitter, and per-step momentum bookkeeping
   let carried = 0;         // powder clinging to the finger (static)
 
@@ -480,11 +559,62 @@ export function createGlitter(canvas, options = {}) {
     vx = new Float32Array(W * H); vy = new Float32Array(W * H);
     outM = new Float32Array(W * H); mIn = new Float32Array(W * H);
     pX = new Float32Array(W * H); pY = new Float32Array(W * H);
+    lA = new Int8Array(W * H).fill(-1); lB = new Int8Array(W * H).fill(-1); lF = new Float32Array(W * H);
+    sA = new Int8Array(W * H).fill(-1); sB = new Int8Array(W * H).fill(-1); sF = new Float32Array(W * H);
+    iA = new Int8Array(W * H).fill(-1); iB = new Int8Array(W * H).fill(-1); iF = new Float32Array(W * H);
     makeGlue();
     buf = new Float32Array(W * H * 4);
+    colBuf = new Uint8Array(W * H * 4);
     for (let i = 0; i < thr.length; i++) thr[i] = REPOSE * (0.8 + 0.4 * Math.random());
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.FLOAT, buf);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, colBuf);
+    gl.activeTexture(gl.TEXTURE0);
   }
+
+  // ---------- Glitter colours ----------
+  // Mixes m2 of glitter (slots a2 and b2, share f2 of b2) into cell i of a layer that
+  // already holds m1. A cell keeps its two main colours; a third, smaller one is
+  // shared out between them.
+  const mixS = new Int8Array(4), mixW = new Float32Array(4);
+  function mixInto(A, B, F, i, m1, a2, b2, f2, m2) {
+    if (m2 <= 0 || a2 < 0) return;
+    const a1 = A[i];
+    if (m1 <= 1e-4 || a1 < 0) { A[i] = a2; B[i] = b2; F[i] = b2 < 0 ? 0 : f2; return; }
+    const b1 = B[i];
+    if (b1 < 0 && b2 < 0 && a1 === a2) return;          // same single colour: nothing changes
+    const f1 = F[i];
+    mixS[0] = a1; mixW[0] = m1 * (1 - f1);
+    mixS[1] = b1; mixW[1] = b1 < 0 ? 0 : m1 * f1;
+    mixS[2] = a2; mixW[2] = m2 * (1 - f2);
+    mixS[3] = b2; mixW[3] = b2 < 0 ? 0 : m2 * f2;
+    for (let p = 0; p < 4; p++) {
+      if (mixW[p] <= 0) continue;
+      for (let q = p + 1; q < 4; q++) if (mixS[q] === mixS[p] && mixW[q] > 0) { mixW[p] += mixW[q]; mixW[q] = 0; }
+    }
+    let i1 = -1, i2 = -1;
+    for (let p = 0; p < 4; p++) {
+      if (mixW[p] <= 0) continue;
+      if (i1 < 0 || mixW[p] > mixW[i1]) { i2 = i1; i1 = p; }
+      else if (i2 < 0 || mixW[p] > mixW[i2]) i2 = p;
+    }
+    if (i1 < 0) return;
+    const share = i2 < 0 ? 0 : mixW[i2] / (mixW[i1] + mixW[i2]);
+    A[i] = mixS[i1];
+    if (share < 0.02) { B[i] = -1; F[i] = 0; } else { B[i] = mixS[i2]; F[i] = share; }
+  }
+  // Adds m of loose glitter to cell i
+  function addLoose(i, m, a, b, f) {
+    mixInto(lA, lB, lF, i, Math.max(0, h[i] - stuck[i]), a, b, f, m);
+    h[i] += m;
+  }
+  // Glitter bonding to the glue takes on the colour of the loose glitter it came from
+  function setStuck(i, ns) {
+    if (ns > stuck[i]) mixInto(sA, sB, sF, i, stuck[i], lA[i], lB[i], lF[i], ns - stuck[i]);
+    stuck[i] = ns;
+  }
+  // One flake's colour, from the cell it left
+  const pickSlot = (i) => (lB[i] >= 0 && Math.random() < lF[i] ? lB[i] : lA[i]);
 
   // The hidden word, "written" in glue by hand. Hand-laid glue is uneven: strokes swell
   // and pinch, some stretches are barely tacky, edges are ragged.
@@ -602,6 +732,11 @@ export function createGlitter(canvas, options = {}) {
     }
     inkCtx.clearRect(0, 0, vw, vh);
     inkCtx.putImageData(new ImageData(px, vw, vh), 0, 0);
+    if (holes) {                                                  // bits of the word that were erased
+      inkCtx.globalCompositeOperation = 'destination-out';
+      inkCtx.drawImage(holes, 0, 0);
+      inkCtx.globalCompositeOperation = 'source-over';
+    }
     if (strokes) inkCtx.drawImage(strokes, 0, 0);
     uploadInk();
     glue.fill(0);
@@ -643,7 +778,12 @@ export function createGlitter(canvas, options = {}) {
 
   // Show the finished piece straight away: only glitter held by glue (and a little by paper)
   function reveal() {
-    for (let i = 0; i < h.length; i++) { const c = GLUE_DEPTH * glue[i] + paperCap[i]; stuck[i] = c; h[i] = c; }
+    const s = slotNow();
+    for (let i = 0; i < h.length; i++) {
+      const c = GLUE_DEPTH * glue[i] + paperCap[i];
+      if (c > stuck[i] && (h[i] - stuck[i] <= 1e-4 || lA[i] < 0)) { lA[i] = s; lB[i] = -1; lF[i] = 0; }   // fills bare glue in the current colour
+      setStuck(i, c); h[i] = c;
+    }
     np = 0; carried = 0; flow.fill(0); vx.fill(0); vy.fill(0);
     active = 2; dirty = true;
   }
@@ -652,7 +792,7 @@ export function createGlitter(canvas, options = {}) {
   function absorb() {
     for (let i = 0; i < glue.length; i++) {
       const cap = GLUE_DEPTH * glue[i] + paperCap[i];
-      if (stuck[i] < cap) stuck[i] = Math.min(h[i], cap);
+      if (stuck[i] < cap) setStuck(i, Math.min(h[i], cap));
     }
   }
 
@@ -663,6 +803,7 @@ export function createGlitter(canvas, options = {}) {
   //   rag     ragged outline 0…1       lumps   bumpy surface 0…1
   //   dust    stray glitter around it 0…1
   function pour(cx, cy, o) {
+    const slot = slotNow();
     const { r, peak, shape = 0.1, stretch = 0, rag = 0.22, lumps = 0.5, dust = 0.5 } = o;
     const seedOff = Math.random() * 100;
     const sx = 1.08 * Math.pow(2, stretch * 0.8), sy = 0.85 * Math.pow(2, -stretch * 0.8);
@@ -681,33 +822,57 @@ export function createGlitter(canvas, options = {}) {
         // Fine dust thrown around the heap: fades with distance, patchy like real spills
         if (dust <= 0 || d >= 1 + 0.9 * (0.4 + dust)) continue;
         const patch = fbm(x * 0.06 + seedOff * 2, y * 0.06);
-        h[y * W + x] += dust * Math.exp(-(d - 1) * 4.0 / (0.4 + dust)) * Math.max(0, patch * 1.8 - 0.45);
+        const m = dust * Math.exp(-(d - 1) * 4.0 / (0.4 + dust)) * Math.max(0, patch * 1.8 - 0.45);
+        if (m > 0) addLoose(y * W + x, m, slot, -1, 0);
         continue;
       }
       const lump = (fbm(x * 0.09 + seedOff, y * 0.09) - 0.5) * 0.6 * lumps * peak * (1 - d);
-      h[y * W + x] += Math.max(0, peak * Math.pow(1 - d, expo) * (1 - 0.3 * d * d) + lump);
+      const m = Math.max(0, peak * Math.pow(1 - d, expo) * (1 - 0.3 * d * d) + lump);
+      if (m > 0) addLoose(y * W + x, m, slot, -1, 0);
     }
     const strays = Math.round(3000 * dust * (r / 100));
     for (let k = 0; k < strays; k++) {
       const ang = Math.random() * Math.PI * 2, rd = r * (1 + Math.pow(Math.random(), 2) * (0.4 + 1.2 * dust));
       const x = Math.round(cx + Math.cos(ang) * rd * sx), y = Math.round(cy + Math.sin(ang) * rd * sy);
-      if (x > 0 && y > 0 && x < W - 1 && y < H - 1) h[y * W + x] += 0.05 + Math.random() * 0.25;
+      if (x > 0 && y > 0 && x < W - 1 && y < H - 1) addLoose(y * W + x, 0.05 + Math.random() * 0.25, slot, -1, 0);
     }
     absorb();
     for (let k = 0; k < 40; k++) relax();
     active = 150; dirty = true;
   }
 
-  // The main pour, from the pour settings
-  function pourMain() {
+  // The main pour, from the pour settings. fit: shape the heap to just cover the bare
+  // glue (for pouring again over a piece in progress) instead of the generous first pour.
+  function pourMain(fit = false) {
     const P = pourParams;
-    // Cover the glue: the word, anything drawn, or (with neither) the middle
+    // Cover the glue that's still bare (so earlier colours are left alone); with none
+    // bare, all of the glue: the word and anything drawn; with no glue, the middle
     let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
-    if (GB && GB.tw > 0) { bx0 = (VW - GB.tw) / 2; bx1 = (VW + GB.tw) / 2; by0 = (VH - GB.th) / 2; by1 = (VH + GB.th) / 2; }
-    if (inkBox) { bx0 = Math.min(bx0, inkBox.x0); by0 = Math.min(by0, inkBox.y0); bx1 = Math.max(bx1, inkBox.x1); by1 = Math.max(by1, inkBox.y1); }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (glue[i] < 0.15 || stuck[i] > 0.5 * GLUE_DEPTH * glue[i]) continue;
+      const px = (x + 0.5) * CELL, py = VH - (y + 0.5) * CELL;
+      if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py;
+    }
+    if (bx1 > bx0) { bx0 -= CELL; bx1 += CELL; by0 -= CELL; by1 += CELL; }
+    else {
+      if (GB && GB.tw > 0) { bx0 = (VW - GB.tw) / 2; bx1 = (VW + GB.tw) / 2; by0 = (VH - GB.th) / 2; by1 = (VH + GB.th) / 2; }
+      if (inkBox) { bx0 = Math.min(bx0, inkBox.x0); by0 = Math.min(by0, inkBox.y0); bx1 = Math.max(bx1, inkBox.x1); by1 = Math.max(by1, inkBox.y1); }
+    }
     const has = bx1 > bx0;
     const bw = has ? bx1 - bx0 : Math.min(VW, VH) * 0.55, bh = has ? by1 - by0 : Math.min(VW, VH) * 0.3;
     const mx = has ? (bx0 + bx1) / 2 : VW / 2, my = has ? (by0 + by1) / 2 : VH / 2;
+    if (fit && has) {
+      // an oval a bit bigger than the box (the rim is ragged and thin), stretched to its shape
+      const rx = bw / 2 + 24, ry = bh / 2 + 24;
+      const stretch = Math.max(-1.2, Math.min(1.2, Math.log2(rx / ry / 1.27) / 1.6));
+      const sx = 1.08 * Math.pow(2, stretch * 0.8);
+      pour(mx / CELL, (VH - my) / CELL, {
+        r: 1.5 * rx / sx / CELL, peak: 1.5 + 38 * P.depth * P.depth,
+        shape: P.shape, stretch, rag: P.rag, lumps: P.lumps, dust: P.dust,
+      });
+      return;
+    }
     pour(mx / CELL, (VH - my) / CELL, {
       // Spread is relative to what it covers, so the pour keeps covering it at any size
       r: P.spread * 3 * Math.max(bw * 0.5, bh * 0.9) * (has ? 1 : 0.6) / CELL,
@@ -735,7 +900,7 @@ export function createGlitter(canvas, options = {}) {
           if (d <= T) continue;
           const t = Math.min((d - T) * 0.25, h[i] - stuck[i]);
           if (t <= 0) continue;
-          h[i] -= t; h[j] += t; moved += t;
+          h[i] -= t; addLoose(j, t, lA[i], lB[i], lF[i]); moved += t;
           flow[j] += t * 1.5;
           if (t > 0.03) seed[j] = (seed[j] + 1) % 1024;
         } else {
@@ -743,7 +908,7 @@ export function createGlitter(canvas, options = {}) {
           if (-d <= T) continue;
           const t = Math.min((-d - T) * 0.25, h[j] - stuck[j]);
           if (t <= 0) continue;
-          h[j] -= t; h[i] += t; moved += t;
+          h[j] -= t; addLoose(i, t, lA[j], lB[j], lF[j]); moved += t;
           flow[i] += t * 1.5;
           if (t > 0.03) seed[i] = (seed[i] + 1) % 1024;
         }
@@ -753,13 +918,13 @@ export function createGlitter(canvas, options = {}) {
   }
   function decayFlow() { for (let i = 0; i < flow.length; i++) flow[i] *= 0.8; }
 
-  function splat(x, y, m) {
+  function splat(x, y, m, a, b = -1, f = 0) {
     x -= 0.5; y -= 0.5;
     const xi = Math.floor(x), yi = Math.floor(y);
     if (xi < 1 || yi < 1 || xi >= W - 2 || yi >= H - 2) return;
     const fx = x - xi, fy = y - yi, i = yi * W + xi;
-    h[i] += m * (1 - fx) * (1 - fy); h[i + 1] += m * fx * (1 - fy);
-    h[i + W] += m * (1 - fx) * fy;   h[i + W + 1] += m * fx * fy;
+    addLoose(i, m * (1 - fx) * (1 - fy), a, b, f); addLoose(i + 1, m * fx * (1 - fy), a, b, f);
+    addLoose(i + W, m * (1 - fx) * fy, a, b, f);   addLoose(i + W + 1, m * fx * fy, a, b, f);
   }
 
   // The finger presses down to a shallow floor and shoves the excess outward, biased forward
@@ -776,6 +941,7 @@ export function createGlitter(canvas, options = {}) {
       h[i] -= take;
       seed[i] = (seed[i] + 1) % 1024;
       const cling = Math.min(take * 0.15, Math.max(0, CLING_MAX - carried));
+      if (cling > 0 && (carried < 0.05 || Math.random() < cling / (carried + cling))) carriedSlot = pickSlot(i);
       carried += cling;                        // some sticks to the finger
       const pushed = take - cling;
       let ux = (d ? ox / d : Math.random() - 0.5) + fx * 1.2;
@@ -783,14 +949,14 @@ export function createGlitter(canvas, options = {}) {
       const ul = Math.hypot(ux, uy) || 1;
       ux /= ul; uy /= ul;
       const reach = R + 0.8 + Math.random() * 1.5;
-      splat(cx + ux * reach, cy + uy * reach, pushed);
+      splat(cx + ux * reach, cy + uy * reach, pushed, lA[i], lB[i], lF[i]);
     }
     // The finger sheds a little of what clings to it, leaving a dusty trail behind
     const shed = carried * 0.04;
     carried -= shed;
     for (let k = 0; k < 3; k++) {
       const a = Math.random() * Math.PI * 2, rr = Math.random() * R * 0.8;
-      splat(cx - fx * R * 0.7 + Math.cos(a) * rr, cy - fy * R * 0.7 + Math.sin(a) * rr, shed / 3);
+      splat(cx - fx * R * 0.7 + Math.cos(a) * rr, cy - fy * R * 0.7 + Math.sin(a) * rr, shed / 3, carriedSlot);
     }
     active = 150; dirty = true;
   }
@@ -805,6 +971,7 @@ export function createGlitter(canvas, options = {}) {
     m: new Float32Array(MAXP), spin: new Float32Array(MAXP), rate: new Float32Array(MAXP),
     axis: new Float32Array(MAXP), film: new Float32Array(MAXP), size: new Float32Array(MAXP),
     vt: new Float32Array(MAXP), fl: new Float32Array(MAXP), ph: new Float32Array(MAXP),
+    c: new Int8Array(MAXP),                     // colour (palette slot)
   };
   function kick(cx, cy, fvx, fvy, R, count) {
     for (let k = 0; k < count && np < MAXP; k++) {
@@ -816,16 +983,16 @@ export function createGlitter(canvas, options = {}) {
       if (m <= 0.005) continue;
       h[i] -= m;
       const s = 0.04 + 0.12 * Math.random();
-      spawn(x, y, fvx * s + (Math.random() - 0.5) * 30, fvy * s + (Math.random() - 0.5) * 30, 12 + Math.random() * 30, m);
+      spawn(x, y, fvx * s + (Math.random() - 0.5) * 30, fvy * s + (Math.random() - 0.5) * 30, 12 + Math.random() * 30, m, pickSlot(i));
     }
   }
-  function spawn(x, y, vx, vy, vz, m) {
-    if (np >= MAXP) return;
+  function spawn(x, y, vx, vy, vz, m, c) {
+    if (np >= MAXP || c < 0) return;
     {
       const n = np++;
       P.x[n] = x; P.y[n] = y; P.z[n] = 0.5;
       P.vx[n] = vx; P.vy[n] = vy; P.vz[n] = vz;
-      P.m[n] = m;
+      P.m[n] = m; P.c[n] = c;
       P.spin[n] = Math.random() * Math.PI * 2;
       P.rate[n] = (Math.random() < 0.5 ? -1 : 1) * (3 + Math.random() * 12);
       P.axis[n] = Math.random() * Math.PI * 2;
@@ -964,6 +1131,9 @@ export function createGlitter(canvas, options = {}) {
         const fx = sx - xi, fy = sy - yi, j = yi * W + xi;
         const w00 = (1 - fx) * (1 - fy) * m, w10 = fx * (1 - fy) * m, w01 = (1 - fx) * fy * m, w11 = fx * fy * m;
         dh[j] += w00; dh[j + 1] += w10; dh[j + W] += w01; dh[j + W + 1] += w11;
+        const ca = lA[i], cb = lB[i], cf = lF[i];               // its colours travel with it
+        mixInto(iA, iB, iF, j, mIn[j], ca, cb, cf, w00);         mixInto(iA, iB, iF, j + 1, mIn[j + 1], ca, cb, cf, w10);
+        mixInto(iA, iB, iF, j + W, mIn[j + W], ca, cb, cf, w01); mixInto(iA, iB, iF, j + W + 1, mIn[j + W + 1], ca, cb, cf, w11);
         mIn[j] += w00; mIn[j + 1] += w10; mIn[j + W] += w01; mIn[j + W + 1] += w11;
         const ax = vx[i], ay = vy[i];                            // the glitter brings its momentum along
         pX[j] += w00 * ax; pX[j + 1] += w10 * ax; pX[j + W] += w01 * ax; pX[j + W + 1] += w11 * ax;
@@ -975,23 +1145,28 @@ export function createGlitter(canvas, options = {}) {
         const lift = Math.min(m * 0.5, 0.05);
         dh[i] -= lift; outM[i] += lift;
         const psp = (40 + 110 * f * Math.random()) * spd;
-        spawn(x + 0.5, y + 0.5, wv.ux * psp, wv.uy * psp, 4 + 14 * Math.random(), lift);
+        spawn(x + 0.5, y + 0.5, wv.ux * psp, wv.uy * psp, 4 + 14 * Math.random(), lift, pickSlot(i));
       }
     }
     for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
       const i = y * W + x;
       if (dh[i] === 0 && mIn[i] === 0) continue;
-      if (mIn[i] > 0) {                                          // mix incoming momentum with what stayed
+      const inSlot = iA[i];
+      if (mIn[i] > 0) {                                          // mix incoming momentum (and colour) with what stayed
         const stay = Math.max(0, h[i] - stuck[i] - outM[i]), tot = stay + mIn[i];
         vx[i] = (vx[i] * stay + pX[i]) / tot; vy[i] = (vy[i] * stay + pY[i]) / tot;
-      }
-      // Glitter blowing across glue gets caught: strokes build up unevenly, thickest
-      // where the stream hits them first
-      if (dh[i] > 0 && glue[i] > 0) {
-        const room = GLUE_DEPTH * glue[i] * 1.8 + paperCap[i] - stuck[i];
-        if (room > 0) stuck[i] += Math.min(dh[i] * 0.4, room);
+        mixInto(lA, lB, lF, i, stay, iA[i], iB[i], iF[i], mIn[i]);
+        iA[i] = -1; iB[i] = -1; iF[i] = 0;
       }
       h[i] = Math.max(h[i] + dh[i], 0);
+      // Glitter blowing across glue gets caught: strokes build up unevenly, thickest
+      // where the stream hits them first. Glue that's already coated only builds up
+      // more of its own colour, so other colours blow over it without speckling it.
+      if (dh[i] > 0 && glue[i] > 0) {
+        let room = GLUE_DEPTH * glue[i] + paperCap[i] - stuck[i];
+        if (inSlot >= 0 && inSlot === sA[i] && sB[i] < 0) room += GLUE_DEPTH * glue[i] * 0.8;
+        if (room > 0) setStuck(i, stuck[i] + Math.min(dh[i] * 0.4, room));
+      }
       dh[i] = 0; mIn[i] = 0; pX[i] = 0; pY[i] = 0; outM[i] = 0;
       if (stuck[i] > h[i]) stuck[i] = h[i];
     }
@@ -1022,7 +1197,7 @@ export function createGlitter(canvas, options = {}) {
       const inside = P.x[n] >= 1 && P.y[n] >= 1 && P.x[n] < W - 2 && P.y[n] < H - 2;
       if (P.z[n] <= 0 || gone) {
         if (P.z[n] <= 0 && inside) {
-          splat(P.x[n], P.y[n], P.m[n]);
+          splat(P.x[n], P.y[n], P.m[n], P.c[n]);
           const i = (P.y[n] | 0) * W + (P.x[n] | 0);
           seed[i] = (seed[i] + 1) % 1024;
           active = Math.max(active, 30); dirty = true;
@@ -1038,6 +1213,7 @@ export function createGlitter(canvas, options = {}) {
   // heap: pour a fresh heap over the glue; otherwise leave the paper bare
   function reset(heap = true) {
     h.fill(0); seed.fill(0); flow.fill(0); stuck.fill(0); vx.fill(0); vy.fill(0);
+    lA.fill(-1); lB.fill(-1); sA.fill(-1); sB.fill(-1);
     np = 0; carried = 0;
     if (heap) pourMain(); else { active = 2; dirty = true; }
   }
@@ -1046,13 +1222,14 @@ export function createGlitter(canvas, options = {}) {
   // Rains glitter onto a disc around (cx, cy) in cells: thickest in the middle,
   // grainy at the rim, with the odd stray grain beyond it.
   function sprinkle(cx, cy, R, amount) {
+    const slot = slotNow();
     const x0 = Math.max(1, Math.floor(cx - R * 1.6)), x1 = Math.min(W - 2, Math.ceil(cx + R * 1.6));
     const y0 = Math.max(1, Math.floor(cy - R * 1.6)), y1 = Math.min(H - 2, Math.ceil(cy + R * 1.6));
     for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
       const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / R;
       const i = y * W + x;
-      if (d < 1) h[i] += amount * (1 - d * d) * (0.35 + Math.random());
-      else if (d < 1.6 && Math.random() < 0.06) h[i] += amount * 0.4 * Math.random();
+      if (d < 1) addLoose(i, amount * (1 - d * d) * (0.35 + Math.random()), slot, -1, 0);
+      else if (d < 1.6 && Math.random() < 0.06) addLoose(i, amount * 0.4 * Math.random(), slot, -1, 0);
       else continue;
       seed[i] = (seed[i] + 1) % 1024;
     }
@@ -1062,17 +1239,21 @@ export function createGlitter(canvas, options = {}) {
   // ---------- Glue the person draws ----------
   // Strokes go into their own canvas (so they survive resizes and word changes);
   // the ink canvas is the word's glue with the strokes laid over it.
-  let strokes = null, strokesCtx = null, inkBox = null, inkDirty = false, strokeLen = 0;
+  // Erasing cuts holes in the word's glue too, kept in their own canvas.
+  let strokes = null, strokesCtx = null, holes = null, holesCtx = null, inkBox = null, inkDirty = false, strokeLen = 0;
   function makeStrokes(vw, vh) {
-    const c = document.createElement('canvas');
-    c.width = vw; c.height = vh;
-    const x = c.getContext('2d');
-    if (strokes) x.drawImage(strokes, Math.round((vw - strokes.width) / 2), Math.round((vh - strokes.height) / 2));
+    const grow = (old) => {
+      const c = document.createElement('canvas');
+      c.width = vw; c.height = vh;
+      if (old) c.getContext('2d').drawImage(old, Math.round((vw - old.width) / 2), Math.round((vh - old.height) / 2));
+      return c;
+    };
     if (inkBox && strokes) {
       const ox = Math.round((vw - strokes.width) / 2), oy = Math.round((vh - strokes.height) / 2);
       inkBox = { x0: inkBox.x0 + ox, y0: inkBox.y0 + oy, x1: inkBox.x1 + ox, y1: inkBox.y1 + oy };
     }
-    strokes = c; strokesCtx = x;
+    strokes = grow(strokes); strokesCtx = strokes.getContext('2d');
+    holes = grow(holes); holesCtx = holes.getContext('2d');
   }
   // A hand-laid line of glue from (x0, y0) to (x1, y1), CSS px: it swells and
   // pinches as it goes, like glue squeezed from a bottle.
@@ -1096,12 +1277,39 @@ export function createGlitter(canvas, options = {}) {
     absorb();
     inkDirty = true; dirty = true;
   }
+  // Erases glue along a line (CSS px). Glitter stuck to that glue comes away with it.
+  function eraseLine(x0, y0, x1, y1) {
+    const r = opts.eraserSize / 2;
+    for (const c of [strokesCtx, inkCtx, holesCtx]) {
+      c.save();
+      if (c !== holesCtx) c.globalCompositeOperation = 'destination-out';
+      c.strokeStyle = c.fillStyle = '#000';
+      c.lineWidth = r * 2; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke();
+      c.beginPath(); c.arc(x1, y1, r, 0, Math.PI * 2); c.fill();
+      c.restore();
+    }
+    const bx0 = Math.min(x0, x1) - r, by0 = Math.min(y0, y1) - r, bx1 = Math.max(x0, x1) + r, by1 = Math.max(y0, y1) + r;
+    glueFromInk(bx0, by0, bx1, by1);
+    const cx0 = Math.max(0, Math.floor(bx0 / CELL) - 1), cx1 = Math.min(W - 1, Math.ceil(bx1 / CELL) + 1);
+    const cy0 = Math.max(0, Math.floor((VH - by1) / CELL) - 1), cy1 = Math.min(H - 1, Math.ceil((VH - by0) / CELL) + 1);
+    for (let y = cy0; y <= cy1; y++) for (let x = cx0; x <= cx1; x++) {
+      const i = y * W + x, cap = GLUE_DEPTH * glue[i] + paperCap[i];
+      if (stuck[i] > cap) { h[i] = Math.max(0, h[i] - (stuck[i] - cap)); stuck[i] = cap; }
+    }
+    inkDirty = true; dirty = true;
+  }
   function clearGlue() {
     strokesCtx.clearRect(0, 0, strokes.width, strokes.height);
+    holesCtx.clearRect(0, 0, holes.width, holes.height);
     inkBox = null; strokeLen = 0;
     applyGlue();
-    for (let i = 0; i < stuck.length; i++) stuck[i] = Math.min(stuck[i], GLUE_DEPTH * glue[i] + paperCap[i]);
-    dirty = true;
+    // glitter that was stuck to the wiped glue is loose now: the next blow takes it
+    for (let i = 0; i < stuck.length; i++) {
+      const cap = GLUE_DEPTH * glue[i] + paperCap[i];
+      if (stuck[i] > cap) { mixInto(lA, lB, lF, i, Math.max(0, h[i] - stuck[i]), sA[i], sB[i], sF[i], stuck[i] - cap); stuck[i] = cap; }
+    }
+    active = Math.max(active, 2); dirty = true;
   }
 
   const light = { x: -0.25, y: 0.35 };   // fixed light, upper left
@@ -1120,17 +1328,20 @@ export function createGlitter(canvas, options = {}) {
   }
   // After a resize: a new grid, with the old glitter carried over, centred
   function regrid() {
-    const oW = W, oH = H, oh = h;
+    const oW = W, oH = H, old = h && { h, stuck, lA, lB, lF, sA, sB, sF };
     makeStrokes(VW, VH);                                           // drawn glue moves with the centre too
     alloc();
-    if (oh) {
+    if (old) {
       const ox = Math.round((W - oW) / 2), oy = Math.round((H - oH) / 2);
+      const cur = { h, stuck, lA, lB, lF, sA, sB, sF };
       for (let y = 0; y < oH; y++) {
         const ny = y + oy;
         if (ny < 0 || ny >= H) continue;
         for (let x = 0; x < oW; x++) {
           const nx = x + ox;
-          if (nx >= 0 && nx < W) h[ny * W + nx] = oh[y * oW + x];
+          if (nx < 0 || nx >= W) continue;
+          const i = ny * W + nx, o = y * oW + x;
+          for (const k in cur) cur[k][i] = old[k][o];
         }
       }
     }
@@ -1156,7 +1367,7 @@ export function createGlitter(canvas, options = {}) {
   // CSS px → sim cells; the sim's rows run bottom-up, the screen's top-down
   const toCell = (px, py) => [px / CELL, (VH - py) / CELL];
   const cancelHold = () => { if (hold) { clearTimeout(hold.timer); hold = null; } };
-  const FINGER_R = 5;                                              // cells (~20px)
+  const fingerR = () => Math.max(1.5, opts.pushSize / CELL);       // cells
 
   function onDown(e) {
     if (!ready || destroyed || !opts.interactive) return;
@@ -1170,8 +1381,9 @@ export function createGlitter(canvas, options = {}) {
     const [x, y] = toCell(px, py);
     touch = { id: e.pointerId, px, py, x, y, t: performance.now() };
     if (opts.tool === 'glue') glueLine(px, py, px, py);
+    else if (opts.tool === 'erase') eraseLine(px, py, px, py);
     else if (opts.tool === 'glitter') sprinkle(x, y, opts.brushSize / CELL, opts.amount);
-    else plow(x, y, 0, 0, FINGER_R * 0.8);                        // a dent where it lands
+    else plow(x, y, 0, 0, fingerR() * 0.8);                       // a dent where it lands
   }
   function onMove(e) {
     if (hold && Math.hypot(local(e)[0] - hold.x, local(e)[1] - hold.y) > 10) cancelHold();
@@ -1182,6 +1394,8 @@ export function createGlitter(canvas, options = {}) {
     if (d < 0.5) return;
     if (opts.tool === 'glue') {
       glueLine(touch.px, touch.py, px, py);
+    } else if (opts.tool === 'erase') {
+      eraseLine(touch.px, touch.py, px, py);
     } else if (opts.tool === 'glitter') {
       const R = opts.brushSize / CELL, steps = Math.ceil(d / (R * 0.4));
       for (let k = 1; k <= steps; k++) sprinkle(touch.x + dx * k / steps, touch.y + dy * k / steps, R, opts.amount * 0.5);
@@ -1189,12 +1403,12 @@ export function createGlitter(canvas, options = {}) {
       // at least a frame apart: events can arrive in the same instant, and a
       // near-zero gap would read as an impossibly fast flick
       const now = performance.now(), dt = Math.max(16, now - touch.t) / 1000;
-      const steps = Math.ceil(d / (FINGER_R * 0.5));               // no gaps on fast strokes
-      for (let k = 1; k <= steps; k++) plow(touch.x + dx * k / steps, touch.y + dy * k / steps, dx / d, dy / d, FINGER_R);
+      const R = fingerR(), steps = Math.ceil(d / (R * 0.5));        // no gaps on fast strokes
+      for (let k = 1; k <= steps; k++) plow(touch.x + dx * k / steps, touch.y + dy * k / steps, dx / d, dy / d, R);
       const speed = d / dt;                                        // cells per second
       if (speed > 120) {
         const s = Math.min(1, 500 / speed);                        // even a wild flick throws flakes only so fast
-        kick(x, y, dx / dt * s, dy / dt * s, FINGER_R, Math.min(40, (speed / 12) | 0));
+        kick(x, y, dx / dt * s, dy / dt * s, R, Math.min(40, (speed / 12) | 0));
       }
     }
     Object.assign(touch, { px, py, x, y, t: performance.now() });
@@ -1221,9 +1435,7 @@ export function createGlitter(canvas, options = {}) {
     dirty = true;
   }
   function setColor() {
-    colorState.hex = opts.color;
-    colorState.holo = opts.shimmer;
-    colorState.rgb.set(hexToRgb(opts.color));
+    colorState.holo = opts.shimmer;           // the colour itself is picked up when glitter is next added
   }
 
   // ---------- Loop ----------
@@ -1250,8 +1462,22 @@ export function createGlitter(canvas, options = {}) {
     }
     if (inkDirty) { uploadInk(); inkDirty = false; }
     if (dirty) {
-      for (let i = 0, n = W * H; i < n; i++) { buf[4 * i] = h[i]; buf[4 * i + 1] = seed[i]; buf[4 * i + 2] = Math.min(stuck[i], GLUE_DEPTH * glue[i]); }
+      for (let i = 0, n = W * H; i < n; i++) {
+        buf[4 * i] = h[i]; buf[4 * i + 1] = seed[i]; buf[4 * i + 2] = Math.min(stuck[i], GLUE_DEPTH * glue[i]);
+        // Colours as palette slots. Where there's hardly any loose glitter, what shows
+        // as loose is the glitter stuck to the paper, so it takes the stuck colours.
+        let sa = sA[i], sb = sB[i], sf = sF[i];
+        let la = lA[i], lb = lB[i], lf = lF[i];
+        if (sa < 0) { sa = la; sb = lb; sf = lf; }
+        if (la < 0 || h[i] - stuck[i] < 0.02) { la = sa; lb = sb; lf = sf; }
+        if (la < 0) la = 0; if (sa < 0) sa = 0;
+        colBuf[4 * i] = la * 16 + (lb < 0 ? la : lb); colBuf[4 * i + 1] = Math.round(lf * 255);
+        colBuf[4 * i + 2] = sa * 16 + (sb < 0 ? sa : sb); colBuf[4 * i + 3] = Math.round(sf * 255);
+      }
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, H, gl.RGBA, gl.FLOAT, buf);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, colBuf);
+      gl.activeTexture(gl.TEXTURE0);
       dirty = false;
     }
 
@@ -1263,7 +1489,7 @@ export function createGlitter(canvas, options = {}) {
     gl.uniform2f(U.uLight, light.x, light.y);
     gl.uniform2f(U.uGrid, W, H);
     gl.uniform1f(U.uCell, CELL);
-    gl.uniform3fv(U.uTint, colorState.rgb);
+    gl.uniform3fv(U.uPal, palRgb);
     gl.uniform1f(U.uHolo, colorState.holo);
     gl.uniform1f(U.uFlakePx, flakePx);
     gl.uniform3fv(U.uPaper, paperRgb);
@@ -1273,7 +1499,7 @@ export function createGlitter(canvas, options = {}) {
       for (let n = 0; n < np; n++) {
         const o = n * PSTRIDE;
         pdata[o] = P.x[n]; pdata[o + 1] = P.y[n]; pdata[o + 2] = P.z[n]; pdata[o + 3] = P.size[n];
-        pdata[o + 4] = P.spin[n]; pdata[o + 5] = P.axis[n]; pdata[o + 6] = P.film[n]; pdata[o + 7] = 0;
+        pdata[o + 4] = P.spin[n]; pdata[o + 5] = P.axis[n]; pdata[o + 6] = P.film[n]; pdata[o + 7] = P.c[n];
       }
       gl.useProgram(pprog);
       gl.bindVertexArray(pVao);
@@ -1284,7 +1510,7 @@ export function createGlitter(canvas, options = {}) {
       gl.uniform2f(PU.uRes, canvas.width, canvas.height);
       gl.uniform1f(PU.uDpr, dpr);
       gl.uniform1f(PU.uCell, CELL);
-      gl.uniform3fv(PU.uTint, colorState.rgb);
+      gl.uniform3fv(PU.uPal, palRgb);
       gl.uniform1f(PU.uHolo, colorState.holo);
       gl.uniform2f(PU.uLight, light.x, light.y);
       gl.uniform1f(PU.uShadow, 1);
@@ -1312,7 +1538,7 @@ export function createGlitter(canvas, options = {}) {
   });
 
   return {
-    /** Change any option on the fly (colour, tool, word, …) */
+    /** Change any option on the fly (colour, tool, sizes, word, …) */
     set(o) {
       const wordChanged = 'word' in o && (o.word || '') !== GLUE_TEXT;
       Object.assign(opts, o);
@@ -1323,11 +1549,13 @@ export function createGlitter(canvas, options = {}) {
     },
     /** The breath: blows loose glitter away, leaving what's stuck to the glue */
     blow,
-    /** Pour a fresh heap of glitter over the glue (or the middle, if there's none) */
-    pour() { if (ready) { if (intro.on) Object.assign(intro, { on: false, phase: 'idle' }); blowing = false; reset(true); } },
+    /** Pour a heap of glitter, in the current colour, over the bare glue (or the middle,
+        if there's no glue). What's already on the paper stays. */
+    pour() { if (ready) { if (intro.on) Object.assign(intro, { on: false, phase: 'idle' }); blowing = false; pourMain(true); } },
     /** Sweep all glitter off, keeping the glue */
     clear() { if (ready) { if (intro.on) Object.assign(intro, { on: false, phase: 'idle' }); blowing = false; reset(false); } },
-    /** Wipe the drawn glue (the word, if any, stays) */
+    /** Wipe the drawn glue (the word, if any, comes back whole). Glitter that was
+        stuck to it comes loose. */
     clearGlue() { if (ready) clearGlue(); },
     /** Skip to the finished piece: only the glitter held by glue */
     reveal() { if (ready) { reveal(); finishIntro(); } },
